@@ -300,6 +300,8 @@ swtch() → 切换上下文
 
 scheduler():在主循环中遍历进程表，获取一个RUNNING状态的进程，将cpu运行的进程指向他，然后切换到用户页表，此时仍旧能够访问内核的数据（每个用户进程都有相同的内核映射），然后切换context回到用户进程，此时还是处于内核态，需要调用trapret之后才能返回用户态，用户进程时间片用完后再次回到scheduler时要切换到内核页表
 
+## sysproc.c
+
 ## kalloc.c
 采用空闲链表的方式管理内存，每个节点是一张4096字节大小的页，与lwip的动态内存管理有点相似，每个节点都有管理域(next指针)和数据域(4096 bytes)，空闲时管理域位于数据域的前几个字节，使用时，不需要管理域，数据域全部都可以使用，不需要分配额外的空间给管理域
 
@@ -308,3 +310,64 @@ kalloc()从空闲链表中头节点取出，更新头节点
 kfree()将要释放的page的前几个字节解释为管理域，更新next指针为当前头节点，更新头节点
 freerange()对一个范围内的内存，以pagesize为步进长度，依次调用kfree
 内存初始时刻即kinit1()/kinit2()时调用freerange来讲一段内存初始化，即将内存规划为一个一个node(4096bytes page)，然后加入到空闲链表中
+
+## syscall.c/syscall.h/usys.S
+syscall.h中定义了系统调用号
+usys.S中定义了用户到内核的系统的调用接口，即触发T_SYSCALL中断`int $T_SYSCALL`
+syscall.c中syscalls数组包含了(系统调用号，系统调用函数)，syscall()函数在用户进程调用系统调用时被执行
+以用户调用write为例子 
+```c
+write(1, "hello", 5);
+```
+编译器将其编译为
+```asm
+pushl $5        ; 第三个参数
+pushl $hello    ; 第二个参数（字符串地址）
+pushl $1        ; 第一个参数（文件描述符）
+call  write     ; 调用汇编包装函数 write, call指令会压入pc（指向call的下一条指令）
+```
+到进入usys.S中的write的时候，**用户栈**中新压入了4个内容，esp指向pc，然后就跳转到usys.S中的write执行，将系统调用号存入eax中，然后触发T_SYSCALL中断，此时有会压入新的内容（应该）到**内核栈**中，esp指向pc（int的下一条指令）， 进入内核态后，**用户态的上下文会被压入trapframe中（即trapframe中的esp还是指向用户栈的栈顶）**，通过中断向量表执行对应的中断处理函数，即syscall()（在syscall.c）中，这时候检查eax（从用户态陷入到内核态，会将环境保存到trapfram中，此时eax存储系统调用号），然后调用syscalls数组对应号的系统调用，并将返回结果回填到eax中
+fetchint()和fetchstr()就是将某个地址处的内容转换为某个类型然后传递给调用者
+argint()将第n个参数以int（4字节）形式取出（以trapframe中保存的esp为基地址）
+argstr()将第n个参数以string（0结尾）形式取出
+argptr()将第n个参数以任意形式取出（一个变量=地址+大小，地址我们有了，argptr接收一个大小，就能够取出任意类型的参数了）
+进入到系统调用内了，特权级改为内核态了（cpu自动），页表应该是没有切换的，不然无法从用户栈中获取数据，每个用户页表都有相同的内核页映射，所以能够访问内核相关数据
+
+## vectors.S
+由`vectors.pl`生成，定义了两部分
+1. 中断处理函数，所有的中断全部跳转到alltraps处处理，然后有的中断触发时，cpu会自动压入错误码，有的不会，所以不会压入错误码的需要手动压入，这是为了和trapframe的布局匹配，然后在压入中断号
+```asm
+.globl vector1
+vector1:
+  pushl $0
+  pushl $1
+  jmp alltraps
+...
+.globl vector8
+vector8:
+  pushl $8
+  jmp alltraps
+```
+2. 中断向量表，导出vectors给idt的构造使用
+```asm
+# vector table
+.data
+.globl vectors
+vectors:
+  .long vector0
+  .long vector1
+  .long vector2
+  ...
+```
+
+## trapasm.S
+alltraps显示保存上下文，人为构造一个trapframe（即按照trapframe的布局，将参数压入栈），然后调用trap(struct trapframe *tf)函数再C中处理
+trapret从内核态还原到用户态，寄存器弹出
+
+## trap.c
+
+## file.c/file.h
+
+## sysfile.c/sysfile.h
+
+## pipe.c
